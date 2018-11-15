@@ -26,6 +26,7 @@ import sys
 import operator
 import warnings
 import textwrap
+import string
 import re
 from functools import reduce
 
@@ -4990,13 +4991,71 @@ class MaskedArray(ndarray):
         <type 'numpy.int64'>
 
         """
+        def einsum_accu_dtype(data_dtype):
+            '''return largest dtype of data.dtypes kind'''
+            return {
+                'u': np.dtype('u8'),
+                'i': np.dtype('i8'),
+                'f': np.dtype('f8'),
+            }.get(data_dtype.kind, data_dtype)
+
+        def einsum_result_letters(letters, axis):
+            '''create einsum result format string
+
+            assume the input has 4 dimensions, letters is 'abcd'
+            assume axis=1, the result letters is 'acd'
+            '''
+            if axis is None:
+                return ''
+
+            result_letters = list(letters)
+            if isinstance(axis, int):
+                del result_letters[axis]
+            else:
+                for ax in sorted(axis, reverse=True):
+                    del result_letters[ax]
+            return ''.join(result_letters)
+
+        def einsum_keepdims(result, axis, ndim):
+            '''keepdims implementation for einsum'''
+            if np.isscalar(result):
+                result = np.array(result, ndmin=ndim)
+            else:
+                if isinstance(axis, int):
+                    result = np.expand_dims(result, axis=axis)
+                else:
+                    for ax in sorted(axis):
+                        result = np.expand_dims(result, axis=ax)
+
         kwargs = {} if keepdims is np._NoValue else {'keepdims': keepdims}
 
         _mask = self._mask
         newmask = _check_mask_axis(_mask, axis, **kwargs)
         # No explicit output
         if out is None:
-            result = self.filled(0).sum(axis, dtype=dtype, **kwargs)
+            if _mask is nomask:
+                result = np.sum(self.data, axis=axis, **kwargs)
+            elif self.data.dtype is np.dtype('O'):
+                # cannot use einsum for dtype=object
+                result = self.filled(0).sum(axis, dtype=dtype, **kwargs)
+            else:
+                letters = string.ascii_lowercase[:self.data.ndim]
+                result_letters = einsum_result_letters(letters, axis)
+                format_string = "{0},{0}->{1}".format(letters, result_letters)
+                result = np.einsum(
+                    format_string,
+                    self.data,
+                    np.logical_not(_mask),
+                    dtype=einsum_accu_dtype(self.data.dtype)
+                )
+                # einsum does not know "keepdims"
+                if keepdims is True:
+                    result = einsum_keepdims(
+                        result=result,
+                        axis=axis,
+                        ndim=self.data.ndim
+                    )
+
             rndim = getattr(result, 'ndim', 0)
             if rndim:
                 result = result.view(type(self))
@@ -6338,7 +6397,7 @@ class MaskedConstant(MaskedArray):
 
     def __copy__(self):
         return self
-		
+
     def __deepcopy__(self, memo):
         return self
 
@@ -7087,7 +7146,7 @@ def where(condition, x=_NoValue, y=_NoValue):
     Parameters
     ----------
     condition : array_like, bool
-        Where True, yield `x`, otherwise yield `y`. 
+        Where True, yield `x`, otherwise yield `y`.
     x, y : array_like, optional
         Values from which to choose. `x`, `y` and `condition` need to be
         broadcastable to some shape.
